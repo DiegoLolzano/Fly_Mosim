@@ -1,0 +1,15 @@
+# Entornos virtuales
+.venv/
+venv/
+env/
+
+# Archivos compilados de Python
+__pycache__/
+*.pyc
+
+# Archivos pesados de entrenamiento de RL
+models/
+logs/
+
+# Configuraciones locales del editor
+.vscode/

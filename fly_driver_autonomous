@@ -1,0 +1,382 @@
+import math
+import time
+import vgamepad as vg
+from field_map import WAYPOINTS
+from telemetry_receiver import MoSimTelemetryReceiver
+
+
+class PIDController:
+
+  def __init__(
+      self,
+      kp: float,
+      ki: float = 0.0,
+      kd: float = 0.0,
+      max_integral: float = 0.5,
+  ):
+    self.kp = kp
+    self.ki = ki
+    self.kd = kd
+    self.max_integral = max_integral
+    self.prev_error = 0.0
+    self.integral = 0.0
+
+  def calculate(self, error: float, dt: float = 0.02) -> float:
+    self.integral += error * dt
+    self.integral = max(
+        min(self.integral, self.max_integral), -self.max_integral
+    )
+    derivative = (error - self.prev_error) / dt if dt > 0 else 0.0
+    self.prev_error = error
+    return (self.kp * error) + (self.ki * self.integral) + (self.kd * derivative)
+
+  def reset(self):
+    self.prev_error = 0.0
+    self.integral = 0.0
+
+
+def normalize_angle(angle_deg: float) -> float:
+  while angle_deg > 180.0:
+    angle_deg -= 360.0
+  while angle_deg < -180.0:
+    angle_deg += 360.0
+  return angle_deg
+
+
+def clamp(val: float, min_val: float = -1.0, max_val: float = 1.0) -> float:
+  return max(min(val, max_val), min_val)
+
+
+def stow_mechanism(gamepad):
+  gamepad.press_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_UP)
+  gamepad.update()
+  time.sleep(0.20)
+  gamepad.release_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_UP)
+  gamepad.update()
+  time.sleep(0.15)
+
+
+def set_elevator_level(gamepad, level: str):
+  buttons = {
+      "L1": vg.XUSB_BUTTON.XUSB_GAMEPAD_A,
+      "L2": vg.XUSB_BUTTON.XUSB_GAMEPAD_B,
+      "L3": vg.XUSB_BUTTON.XUSB_GAMEPAD_X,
+      "L4": vg.XUSB_BUTTON.XUSB_GAMEPAD_Y,
+  }
+  if level in buttons:
+    btn = buttons[level]
+    gamepad.press_button(button=btn)
+    gamepad.update()
+    time.sleep(0.20)
+    gamepad.release_button(button=btn)
+    gamepad.update()
+  elif level == "STOW":
+    stow_mechanism(gamepad)
+
+
+def hunt_closest_coral(
+    gamepad,
+    telemetry,
+    pid_yaw,
+    pid_forward,
+    target_zone=(0.58, -7.15),
+    timeout=6.0,
+):
+  """Persigue el coral más cercano a la zona del feeder hasta que has_coral sea True."""
+  print(f"\n[Caza de Piezas] Buscando coral en zona Feeder {target_zone}...")
+
+  # Desplegar intake al piso y encender rodillos de inmediato
+  set_elevator_level(gamepad, "L1")
+  time.sleep(0.15)
+  gamepad.left_trigger_float(1.0)
+  gamepad.update()
+
+  start_t = time.time()
+  while time.time() - start_t < timeout:
+    pose = telemetry.get_pose()
+
+    # 1. Condición de éxito: La física de Unity confirmó que la pieza está adentro
+    if pose.has_coral:
+      print("\n[Caza de Piezas] ¡Confirmado: Coral dentro del robot!")
+      gamepad.left_joystick_float(0.0, 0.25)
+      gamepad.update()
+      time.sleep(0.3)
+      break
+
+    # 2. Buscar únicamente piezas en el radio de la estación humana
+    target_coral = telemetry.get_closest_coral_near(
+        center_point=target_zone, max_dist=3.5
+    )
+
+    if target_coral is None:
+      # Si aún no cae, esperar con avance muy lento
+      gamepad.left_joystick_float(0.0, 0.15)
+      gamepad.right_joystick_float(0.0, 0.0)
+      gamepad.update()
+      time.sleep(0.05)
+      continue
+
+    cx, cz = target_coral
+    dx = cx - pose.x
+    dz = cz - pose.z
+    dist = math.hypot(dx, dz)
+
+    desired_yaw = math.degrees(math.atan2(dx, dz))
+    err_yaw = normalize_angle(desired_yaw - pose.yaw)
+
+    cmd_turn = clamp(pid_yaw.calculate(err_yaw), -0.65, 0.65)
+    cmd_forward = clamp(pid_forward.calculate(dist), 0.18, 0.45)
+    if abs(err_yaw) > 20.0:
+      cmd_forward *= 0.35
+
+    gamepad.left_joystick_float(x_value_float=0.0, y_value_float=cmd_forward)
+    gamepad.right_joystick_float(x_value_float=cmd_turn, y_value_float=0.0)
+    gamepad.update()
+
+    print(
+        f"Cazando Coral -> Pos: ({cx:.2f}, {cz:.2f}) | Dist: {dist:4.2f}m |"
+        f" YawErr: {err_yaw:5.1f}° | hasCoral: {pose.has_coral}",
+        end="\r",
+    )
+    time.sleep(0.02)
+
+  # Apagar rodillos y recoger
+  gamepad.left_joystick_float(0.0, 0.0)
+  gamepad.right_joystick_float(0.0, 0.0)
+  gamepad.left_trigger_float(0.0)
+  gamepad.update()
+  stow_mechanism(gamepad)
+
+
+def execute_action(gamepad, action: str, dwell: float, telemetry=None):
+  if action.startswith("SCORE_"):
+    parts = action.split("_")
+    level = parts[1] if len(parts) > 1 else "L4"
+    align_side = parts[2] if len(parts) > 2 else "LEFT"
+
+    btn_align = (
+        vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_SHOULDER
+        if align_side == "LEFT"
+        else vg.XUSB_BUTTON.XUSB_GAMEPAD_RIGHT_SHOULDER
+    )
+
+    print(f" -> Bloqueando con AutoAlign ({align_side})...")
+    gamepad.press_button(button=btn_align)
+    for _ in range(8):
+      gamepad.left_joystick_float(x_value_float=0.0, y_value_float=0.30)
+      gamepad.update()
+      time.sleep(0.1)
+
+    gamepad.left_joystick_float(0.0, 0.0)
+    gamepad.update()
+    time.sleep(0.15)
+    gamepad.release_button(button=btn_align)
+    gamepad.update()
+
+    print(f" -> Elevando a {level}...")
+    set_elevator_level(gamepad, level)
+    time.sleep(0.9)
+
+    print(" -> Colocando Coral (RT)...")
+    for _ in range(4):
+      gamepad.right_trigger_float(1.0)
+      gamepad.update()
+      time.sleep(0.1)
+    gamepad.right_trigger_float(0.0)
+    gamepad.update()
+    time.sleep(0.2)
+
+    stow_mechanism(gamepad)
+
+  elif action == "HUNT_CORAL":
+    pid_chase_yaw = PIDController(kp=0.035, kd=0.004)
+    pid_chase_fwd = PIDController(kp=0.7, kd=0.05)
+    hunt_closest_coral(
+        gamepad,
+        telemetry,
+        pid_chase_yaw,
+        pid_chase_fwd,
+        target_zone=(0.58, -7.15),
+        timeout=dwell,
+    )
+
+  elif action == "TRAVEL":
+    if dwell > 0:
+      time.sleep(dwell)
+
+
+RUTINA = [
+    # 0. Salida
+    {
+        "target": {
+            "name": "Lado Despejado",
+            "x": 5.20,
+            "z": 2.20,
+            "yaw": 240.0,
+        },
+        "dwell": 0.0,
+        "action": "TRAVEL",
+    },
+    # 1. Cara 1 Reef
+    {
+        "target": WAYPOINTS.get(
+            "reef_1",
+            {"name": "Cara 1", "x": 5.80, "z": 0.20, "yaw": 272.2},
+        ),
+        "dwell": 1.2,
+        "action": "SCORE_L4_LEFT",
+    },
+    # 2. Navegar directamente hacia la Estación Humana
+    {
+        "target": {
+            "name": "Frente a Feeder",
+            "x": 0.58,
+            "z": -7.15,
+            "yaw": 318.8,
+        },
+        "dwell": 0.0,
+        "action": "TRAVEL",
+    },
+    # 3. Caza reactiva: solo corales de esa estación, corta al tener la pieza adentro
+    {
+        "target": {
+            "name": "Caza en Feeder",
+            "x": 0.58,
+            "z": -7.15,
+            "yaw": 318.8,
+        },
+        "dwell": 5.0,
+        "action": "HUNT_CORAL",
+    },
+    # 4. Retorno a cara 6
+    {
+        "target": WAYPOINTS.get(
+            "reef_6",
+            {"name": "Cara 6", "x": 5.80, "z": -1.00, "yaw": 140.0},
+        ),
+        "dwell": 1.2,
+        "action": "SCORE_L3_RIGHT",
+    },
+]
+
+
+def main():
+  print("[La Mosca] Inicializando Gamepad virtual...")
+  gamepad = vg.VX360Gamepad()
+  time.sleep(1.0)
+
+  print("[La Mosca] Conectando receptor de telemetría...")
+  telemetry = MoSimTelemetryReceiver(ip="127.0.0.1", port=9999)
+  telemetry.start()
+
+  pid_x = PIDController(kp=0.8, kd=0.07)
+  pid_z = PIDController(kp=0.8, kd=0.07)
+  pid_yaw = PIDController(kp=0.035, ki=0.001, kd=0.004)
+
+  print("Esperando telemetría...")
+  while True:
+    pose = telemetry.get_pose()
+    if pose.name:
+      print(
+          f"Conectado a: {pose.name} en ({pose.x:.2f}, {pose.z:.2f}) | hasCoral:"
+          f" {pose.has_coral}"
+      )
+      break
+    time.sleep(0.05)
+
+  tolerance_pos = 0.20
+  tolerance_yaw = 6.0
+  timeout_por_waypoint = 4.5
+
+  try:
+    for idx, step in enumerate(RUTINA):
+      wp = step["target"]
+      action = step["action"]
+      dwell_time = step["dwell"]
+
+      if action == "HUNT_CORAL":
+        execute_action(gamepad, action, dwell_time, telemetry=telemetry)
+        continue
+
+      pid_x.reset()
+      pid_z.reset()
+      pid_yaw.reset()
+
+      print(
+          f"\n>>> Paso {idx + 1}/{len(RUTINA)}: Navegando hacia"
+          f" '{wp['name']}'..."
+      )
+      start_wp_time = time.time()
+      prev_dist = 999.0
+      stuck_cycles = 0
+
+      while True:
+        t0 = time.time()
+        pose = telemetry.get_pose()
+
+        err_x = wp["x"] - pose.x
+        err_z = wp["z"] - pose.z
+        dist = math.hypot(err_x, err_z)
+        err_yaw = normalize_angle(wp["yaw"] - pose.yaw)
+
+        if abs(prev_dist - dist) < 0.005 and dist < 0.28:
+          stuck_cycles += 1
+        else:
+          stuck_cycles = 0
+        prev_dist = dist
+
+        tiempo_transcurrido = time.time() - start_wp_time
+
+        llegada_normal = dist < tolerance_pos and abs(err_yaw) < tolerance_yaw
+        llegada_por_friccion = stuck_cycles > 15 and dist < 0.25
+        llegada_por_timeout = tiempo_transcurrido > timeout_por_waypoint
+
+        if llegada_normal or llegada_por_friccion or llegada_por_timeout:
+          gamepad.left_joystick_float(0.0, 0.0)
+          gamepad.right_joystick_float(0.0, 0.0)
+          gamepad.update()
+          break
+
+        yaw_rad = math.radians(pose.yaw)
+        local_forward = err_z * math.cos(yaw_rad) + err_x * math.sin(yaw_rad)
+        local_strafe = err_x * math.cos(yaw_rad) - err_z * math.sin(yaw_rad)
+
+        cmd_forward = clamp(pid_z.calculate(local_forward))
+        cmd_strafe = clamp(pid_x.calculate(local_strafe))
+
+        raw_turn = pid_yaw.calculate(err_yaw)
+        min_turn_power = 0.11
+        if abs(err_yaw) > tolerance_yaw:
+          cmd_turn = clamp(
+              max(raw_turn, min_turn_power)
+              if raw_turn > 0
+              else min(raw_turn, -min_turn_power)
+          )
+        else:
+          cmd_turn = 0.0
+
+        gamepad.left_joystick_float(
+            x_value_float=cmd_strafe, y_value_float=cmd_forward
+        )
+        gamepad.right_joystick_float(x_value_float=cmd_turn, y_value_float=0.0)
+        gamepad.update()
+
+        elapsed = time.time() - t0
+        time.sleep(max(0.0, 0.02 - elapsed))
+
+      print(f"[Acción en punto] Ejecutando: {action}")
+      execute_action(gamepad, action, dwell_time, telemetry=telemetry)
+
+    print("\n\n=== ¡RUTINA COMPLETADA CON ÉXITO! ===")
+
+  except KeyboardInterrupt:
+    print("\nAbortado por el usuario.")
+  finally:
+    gamepad.left_joystick_float(0.0, 0.0)
+    gamepad.right_joystick_float(0.0, 0.0)
+    gamepad.update()
+    telemetry.stop()
+
+
+if __name__ == "__main__":
+  main()
