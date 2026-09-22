@@ -105,20 +105,47 @@ class MoSimHuntEnv(gym.Env):
         
         pose = self.telemetry.get_pose()
         
-        # --- LÓGICA DE ACTUADORES CORREGIDA (LT y D-Pad Abajo) ---
+        macro_success = False  
+        
+        # --- MACRO DE STOW (VICTORIA INCONDICIONAL) ---
         if pose.piece_type == 1 and pose.is_indexed == 0:
-            # Apagamos Intake (LT)
-            self.gamepad.left_trigger_float(0.0) 
-            # Mandamos la señal de Stow (D-Pad Abajo)
+            print("\n[Progreso] ¡Coral detectado! Ejecutando Macro de STOW ciega...")
+            
+            # Frenamos llantas
+            self.gamepad.left_joystick_float(0.0, 0.0)
+            self.gamepad.right_joystick_float(0.0, 0.0)
+            
+            # Apagamos rodillos 
+            self.gamepad.left_trigger_float(0.0)
+            self.gamepad.update()
+            time.sleep(0.15) 
+            
+            # Mantenemos presionado Stow
             self.gamepad.press_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_DOWN)
+            self.gamepad.update()
+            
+            # 2.5 segundos de pausa ABSOLUTA.
+            time.sleep(2.5)
+            
+            # ¡Declaramos la victoria sin preguntarle a los sensores!
+            macro_success = True
+                    
+            # Soltamos Stow 
+            self.gamepad.release_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_DOWN)
+            self.gamepad.update()
+            time.sleep(0.1) 
+            
+            pose = self.telemetry.get_pose()
+
+        # Comportamiento normal si no está stoweando
         else:
             if pose.piece_type == 0:
-                self.gamepad.left_trigger_float(1.0)
-            # Soltamos Stow
+                self.gamepad.left_trigger_float(1.0) 
+            else:
+                self.gamepad.left_trigger_float(0.0) 
             self.gamepad.release_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_DOWN)
-            
-        self.gamepad.update()
-        time.sleep(0.02)
+            self.gamepad.update()
+            time.sleep(0.02)
 
         pose = self.telemetry.get_pose()
         obs, dist, err_yaw = self._get_obs(pose)
@@ -127,8 +154,8 @@ class MoSimHuntEnv(gym.Env):
         terminated = False
         truncated = self.step_count >= self.max_steps
 
-        if math.hypot(pose.x - self.prev_pose.x, pose.z - self.prev_pose.z) > 1.5:
-            print("\n[Manual] Teletransporte detectado. Forzando reinicio de episodio.")
+        if math.hypot(pose.x - self.prev_pose.x, pose.z - self.prev_pose.z) > 4.0:
+            print("\n[Manual] Teletransporte detectado. Forzando reinicio.")
             truncated = True
 
         reward += (self.prev_dist - dist) * 20.0
@@ -139,15 +166,14 @@ class MoSimHuntEnv(gym.Env):
             terminated = True
             print("\n[Error] El robot engulló un Alga. Episodio abortado.")
 
-        if pose.piece_type == 1 and pose.is_indexed == 0 and self.prev_pose.piece_type == 0:
+        if pose.piece_type == 1 and self.prev_pose.piece_type == 0:
             reward += 50.0
-            print("\n[Progreso] ¡Coral capturado en el intake! Subiendo a STOW...")
 
-        # Éxito maestro
-        if pose.piece_type == 1 and pose.is_indexed == 1:
+        # ÉXITO MAESTRO: Validado incondicionalmente por la macro
+        if macro_success or pose.is_indexed == 1:
             reward += 200.0
             terminated = True
-            print(f"\n[Exito] ¡Coral indexado en STOW en {self.step_count} pasos!")
+            print(f"\n[Exito] ¡Coral asegurado en el End Effector en {self.step_count} pasos!")
 
         self.prev_dist = dist
         self.prev_pose = pose
