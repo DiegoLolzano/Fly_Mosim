@@ -1,4 +1,7 @@
 import math
+import keyboard
+import pickle
+import random
 import time
 import numpy as np
 import gymnasium as gym
@@ -11,18 +14,37 @@ class MoSimHuntEnv(gym.Env):
 
     def __init__(self):
         super().__init__()
-        self.telemetry = MoSimTelemetryReceiver(ip="127.0.0.1", port=9999)
-        self.telemetry.start()
-        self.gamepad = vg.VX360Gamepad()
-        time.sleep(1.0)
-
+        
+        self.max_steps = 1000  # Agrega esta línea (ajusta el número si usabas otro)
+        
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(11,), dtype=np.float32)
+        # ... el resto de tu código ...
 
-        self.prev_pose = None
-        self.prev_dist = 999.0
-        self.step_count = 0
-        self.max_steps = 3000  # Aumentado a ~60 segundos por intento
+        # --- TU CÓDIGO ORIGINAL (Gamepad, Telemetría, etc) ---
+        self.gamepad = vg.VX360Gamepad()
+        self.telemetry = MoSimTelemetryReceiver()
+        # ... 
+
+        # --- CARGAR MACROS PROCEDURALES ---
+        print("[Info] Cargando rutinas de inicialización procedural...")
+        # Asegúrate de que todas digan 'macros/' y no 'marcos/'
+        try:
+            with open('macros/ruta_roja_constante.pkl', 'rb') as f:
+                self.macro_roja = pickle.load(f)
+            
+            with open('macros/ruta_azul_1.pkl', 'rb') as f:
+                self.macro_azul_1 = pickle.load(f)
+            
+            with open('macros/ruta_azul_2.pkl', 'rb') as f:
+                self.macro_azul_2 = pickle.load(f)
+                
+            with open('macros/ruta_verde_1.pkl', 'rb') as f:
+                self.macro_verde_1 = pickle.load(f)
+            # Si grabaste más, agrégalas aquí siguiendo el mismo formato
+            print("[Info] ¡Macros cargadas con éxito!")
+        except FileNotFoundError as e:
+            print(f"[Advertencia] No se encontró el archivo de macro: {e}")
 
     def _get_obs(self, pose):
         closest_coral = self.telemetry.get_closest_piece(piece_type="CORAL")
@@ -54,46 +76,51 @@ class MoSimHuntEnv(gym.Env):
         super().reset(seed=seed)
         self.step_count = 0
         
-        # 1. Neutralizar mandos inmediatamente
+        # 1. Asegurar que el control de Xbox virtual esté neutralizado
         self.gamepad.left_joystick_float(0.0, 0.0)
         self.gamepad.right_joystick_float(0.0, 0.0)
         self.gamepad.left_trigger_float(0.0)
         self.gamepad.release_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_DOWN)
         self.gamepad.update()
         
-        # 2. ESPERA INFINITA HASTA EL REINICIO MANUAL
-        print("\n[ESPERANDO] Episodio terminado. Presiona 'R' en MoSimulator cuando estés listo...")
+        print(f"\n[Episodio] Iniciando auto-reset. Aplicando Domain Randomization...")
         
-        last_pose = self.telemetry.get_pose()
-        while True:
-            current_pose = self.telemetry.get_pose()
-            jump = math.hypot(current_pose.x - last_pose.x, current_pose.z - last_pose.z)
-            
-            if jump > 1.5:
-                break
-                
-            last_pose = current_pose
-            time.sleep(0.1)
-            
-        # 3. EL TIEMPO FUERA (20 segundos)
-        print("\n[REINICIO DETECTADO] Tienes 20 seg. Si sale el brazo de algas, presiona la cruceta ARRIBA (RobotModeToggle) para regresar a Modo Coral.")
-        time.sleep(20.0)
-        print("[¡ACCIÓN!] Teleop iniciado. La IA retoma el control.")
-
-        # 4. Preparar robot: Forzamos estado STOW con D-Pad Abajo
-        self.gamepad.press_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_DOWN)
-        self.gamepad.update()
+        # 2. Reiniciar el simulador (Tecla R nativa)
+        keyboard.send('r')
+        time.sleep(1.0) # Tiempo para que respawnee el robot y las piezas
+        
+        # 3. EJECUTAR EL CAOS PROCEDURAL
+        # Ruta Constante (Salir y escupir)
+        keyboard.play(self.macro_roja)
+        
+        # Ruta Azul (Dispersión de piezas) - Elige al azar
+        caos_azul = random.choice([self.macro_azul_1, self.macro_azul_2])
+        keyboard.play(caos_azul)
+        
+        # Ruta Verde (Posicionamiento final de la IA) - Si tienes más de 1, ponlas en la lista
+        caos_verde = random.choice([self.macro_verde_1]) 
+        keyboard.play(caos_verde)
+        
+        # 4. QUEMAR EL TIEMPO RESTANTE DE GRACIA
+        # keyboard.play ejecuta las acciones en tiempo real. 
+        # Pon aquí un time.sleep() aproximado de lo que falte para llegar a los 20 segundos.
+        # Por ejemplo, si tus macros duran unos 12 segundos, pon 8.0 aquí.
+        time.sleep(8.0) 
+        
+        # 5. ENTREGAR EL CONTROL AL AGENTE PPO
+        # Forzar estado Stow y prender el intake
+        keyboard.send('z')
         time.sleep(0.5)
-        self.gamepad.release_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_DOWN)
-        
         self.gamepad.left_trigger_float(1.0)
         self.gamepad.update()
 
+        # Tomar la primera observación oficial
         pose = self.telemetry.get_pose()
         self.prev_pose = pose
         obs, dist, _ = self._get_obs(pose)
         self.prev_dist = dist
 
+        print("[¡ACCIÓN!] Modo Teleop habilitado. La Mosca entra en cacería.")
         return obs, {}
     
     def step(self, action):
