@@ -36,7 +36,7 @@ class MoSimHuntEnv(gym.Env):
         dist = math.hypot(dx, dz)
 
         yaw_rad = math.radians(pose.yaw)
-        target_yaw_rad = math.atan2(dx, dz)
+        target_yaw_rad = math.atan2(-dx, -dz)
         err_yaw = (target_yaw_rad - yaw_rad + math.pi) % (2 * math.pi) - math.pi
 
         vx = (pose.x - self.prev_pose.x) / 0.02 if self.prev_pose else 0.0
@@ -100,6 +100,7 @@ class MoSimHuntEnv(gym.Env):
         self.step_count += 1
         strafe, forward, turn = float(action[0]), float(action[1]), float(action[2])
 
+        # Traslación Field-Centric (directo a los joysticks)
         self.gamepad.left_joystick_float(x_value_float=strafe, y_value_float=forward)
         self.gamepad.right_joystick_float(x_value_float=turn, y_value_float=0.0)
         
@@ -158,7 +159,23 @@ class MoSimHuntEnv(gym.Env):
             print("\n[Manual] Teletransporte detectado. Forzando reinicio.")
             truncated = True
 
+        # --- CASTIGO POR CHOQUE / ATASCO ---
+        # Sumamos la fuerza que la IA está intentando mandar a las llantas
+        esfuerzo_motores = abs(forward) + abs(strafe)
+        # Calculamos cuánto se movió realmente en este instante
+        velocidad_real = math.hypot(pose.x - self.prev_pose.x, pose.z - self.prev_pose.z)
+        
+        # Si la IA acelera a fondo pero el chasis casi no se mueve...
+        if esfuerzo_motores > 0.5 and velocidad_real < 0.02:
+            reward -= 2.0  # Penalización severa por quemar llanta contra obstáculos
+
+        # Recompensa por acortar distancia
         reward += (self.prev_dist - dist) * 20.0
+        
+        # Castigo por desalineación angular
+        reward -= abs(err_yaw) * 0.5 
+        
+        # Penalización por tiempo
         reward -= 0.05
 
         if pose.piece_type == 2:
